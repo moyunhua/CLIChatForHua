@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+*.env
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.dylib
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Project uploads (keep placeholder)
+uploads/*
+!uploads/Upload files here.txt
