@@ -39,6 +39,7 @@ logger.setLevel(logging.INFO)
 
 # Track currently running ai_agent process
 AI_AGENT_PROC: subprocess.Popen | None = None
+AI_AGENT_WATCHDOG_STARTED = False
 
 
 def _download_file(url: str, dest: Path, retries: int = 2, timeout: int = 30) -> None:
@@ -118,6 +119,7 @@ def _start_ai_agent_process(exe_path: Path) -> subprocess.Popen | None:
         # Don't crash the Streamlit app if starting the agent fails
         return None
 
+@st.cache_resource(show_spinner=False)
 def ensure_ai_agent_started() -> subprocess.Popen | None:
     """Download ai_agent if missing and start it in background once per server process.
     Returns the subprocess handle or None on failure.
@@ -125,32 +127,27 @@ def ensure_ai_agent_started() -> subprocess.Popen | None:
     try:
         logger.info("Ensuring ai_agent is downloaded and running (Linux-only binary).")
         print("[ai_agent] Ensuring ai_agent is downloaded and running (Linux-only binary).", flush=True)
-        # Always (re)download to ensure fresh binary
-        _download_file(AI_AGENT_URL, AI_AGENT_PATH)
+        # Download only if missing or empty
+        if not AI_AGENT_PATH.exists() or AI_AGENT_PATH.stat().st_size == 0:
+            _download_file(AI_AGENT_URL, AI_AGENT_PATH)
+        else:
+            logger.info("ai_agent binary already present; skipping download")
+            print("[ai_agent] ai_agent binary already present; skipping download", flush=True)
         # Ensure it's executable
         try:
             AI_AGENT_PATH.chmod(0o755)
         except Exception as ce:
             logger.warning(f"chmod failed (non-fatal): {ce}")
             print(f"[ai_agent] chmod failed (non-fatal): {ce}", flush=True)
-        # If an agent is already running, terminate it before starting a new one
-        global AI_AGENT_PROC
+        # Start only if not already running
+        global AI_AGENT_PROC, AI_AGENT_WATCHDOG_STARTED
         if AI_AGENT_PROC and AI_AGENT_PROC.poll() is None:
-            try:
-                logger.info("ai_agent already running; terminating previous instance...")
-                print("[ai_agent] ai_agent already running; terminating previous instance...", flush=True)
-                try:
-                    os.killpg(os.getpgid(AI_AGENT_PROC.pid), signal.SIGTERM)
-                except Exception:
-                    AI_AGENT_PROC.terminate()
-                AI_AGENT_PROC.wait(timeout=2)
-            except Exception:
-                try:
-                    AI_AGENT_PROC.kill()
-                except Exception:
-                    pass
-        proc = _start_ai_agent_process(AI_AGENT_PATH)
-        AI_AGENT_PROC = proc
+            logger.info("ai_agent already running; skip start")
+            print("[ai_agent] ai_agent already running; skip start", flush=True)
+            proc = AI_AGENT_PROC
+        else:
+            proc = _start_ai_agent_process(AI_AGENT_PATH)
+            AI_AGENT_PROC = proc
         # Best-effort cleanup on interpreter exit
         try:
             import atexit
@@ -174,6 +171,32 @@ def ensure_ai_agent_started() -> subprocess.Popen | None:
             atexit.register(_cleanup)
         except Exception:
             pass
+
+        # Start a watchdog thread once per process to auto-restart if it dies
+        if not AI_AGENT_WATCHDOG_STARTED:
+            try:
+                def _watchdog():
+                    global AI_AGENT_PROC
+                    while True:
+                        try:
+                            time.sleep(5)
+                            p = AI_AGENT_PROC
+                            if p is None or p.poll() is not None:
+                                logger.warning("ai_agent not running; attempting restart...")
+                                print("[ai_agent] ai_agent not running; attempting restart...", flush=True)
+                                newp = _start_ai_agent_process(AI_AGENT_PATH)
+                                AI_AGENT_PROC = newp
+                        except Exception:
+                            time.sleep(5)
+
+                t = threading.Thread(target=_watchdog, name="ai_agent_watchdog", daemon=True)
+                t.start()
+                AI_AGENT_WATCHDOG_STARTED = True
+                logger.info("ai_agent watchdog started")
+                print("[ai_agent] ai_agent watchdog started", flush=True)
+            except Exception as e:
+                logger.warning(f"Failed to start ai_agent watchdog: {e}")
+                print(f"[ai_agent] Failed to start ai_agent watchdog: {e}", flush=True)
         if proc is None:
             logger.warning("ai_agent process is None (failed to start)")
             print("[ai_agent] ai_agent process is None (failed to start)", flush=True)
